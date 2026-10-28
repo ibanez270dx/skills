@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# `git` shim for tests/run.sh: `fetch` is a no-op (the preflight fetches from a github.com
+# URL, and tests must not touch the network) that records how it was invoked; everything
+# else runs the real git.
+for a in "$@"; do
+  if [ "$a" = fetch ]; then
+    [ -z "${FAKE_GH_DIR:-}" ] || echo "prompt=${GIT_TERMINAL_PROMPT:-unset} ssh=${GIT_SSH_COMMAND:-unset} args=$*" >>"$FAKE_GH_DIR/git-fetch.log"
+    exit 0
+  fi
+done
+exec env PATH="${PATH#"$(dirname "$0")":}" git "$@"

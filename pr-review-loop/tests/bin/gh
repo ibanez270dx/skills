@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Fake `gh` for tests/run.sh. Serves canned responses from $FAKE_GH_DIR and logs every
+# call to $FAKE_GH_DIR/gh.log. It picks a GraphQL response by looking for a marker in the
+# query text, then a page by the `after` variable (none -> "first").
+D=${FAKE_GH_DIR:?FAKE_GH_DIR is required}
+{ printf '%s' "$*" | tr '\n' ' '; echo; } >>"$D/gh.log"
+
+case "$1 $2" in
+  "repo view")
+    # `gh repo view <owner>/<repo> --json defaultBranchRef ...` (00-preflight) vs plain
+    # `gh repo view --json owner,name` (resolve_repo).
+    case ${3:-} in
+      -* | '') cat "$D/repo.json" ;;
+      *) cat "$D/default_branch" ;;
+    esac
+    exit 0 ;;
+  "api user") cat "$D/me"; exit 0 ;;
+  "pr view") cat "$D/pr.json"; exit 0 ;;
+  "pr comment")
+    # Records the call (already in gh.log) and the comment body for assertions.
+    for a in "$@"; do case $a in --body) grab=1; continue ;; esac; [ "${grab:-}" = 1 ] && { printf '%s' "$a" >"$D/pr_comment_body.txt"; grab=0; }; done
+    [ ! -f "$D/pr_comment.exit" ] || { echo "boom: comment failed" >&2; exit "$(cat "$D/pr_comment.exit")"; }
+    echo "https://github.com/acme/widgets/pull/5#issuecomment-1"; exit 0 ;;
+esac
+
+# Responses that change once the review has been requested use a "_after" variant.
+variant() { if [ -f "$D/triggered" ] && [ -f "$D/$1_after$2" ]; then echo "$1_after$2"; else echo "$1$2"; fi; }
+
+if [ "$1" = api ] && [ "$2" = graphql ]; then
+  shift 2
+  query='' after='' tid=''
+  for a in "$@"; do
+    case $a in
+      query=*) query=${a#query=} ;;
+      after=*) after=${a#after=} ;;
+      tid=*) tid=${a#tid=} ;;
+    esac
+  done
+  has() { case $query in *"$1"*) return 0 ;; esac; return 1; }
+  # seqcat <kind> <page>: the Nth read of the FIRST page uses <kind>_first_<N>.json when it
+  # exists (so a test can make the PR change between reads), else <kind>_first.json.
+  seqcat() {
+    if [ "$2" = first ]; then
+      n=$(( $(cat "$D/$1.count" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$D/$1.count"
+      if [ -f "$D/$1_first_$n.json" ]; then cat "$D/$1_first_$n.json"; return; fi
+    fi
+    cat "$D/$1_$2.json"
+  }
+  page=${after:-first}
+  if has requestReviewsByLogin; then
+    touch "$D/triggered"
+    [ ! -f "$D/mutation.err" ] || cat "$D/mutation.err" >&2
+    [ ! -f "$D/mutation.out" ] || cat "$D/mutation.out"
+    exit "$(cat "$D/mutation.exit" 2>/dev/null || echo 0)"
+  elif has resolveReviewThread; then
+    if [ -f "$D/resolve_fail_ids" ] && grep -qx "$tid" "$D/resolve_fail_ids"; then
+      echo "boom: could not resolve $tid" >&2
+      exit 1
+    fi
+    echo '{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}'
+  elif has addPullRequestReviewThreadReply; then
+    echo '{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"C1"}}}}'
+  elif has isOutdated; then cat "$D/cleanup_$page.json"
+  elif has issueComments; then seqcat comments "$page"   # before node(id: its query comments mention node(id:)
+  elif has 'node(id'; then cat "$D/node_$page.json"
+  elif has reviewThreads; then seqcat threads "$page"
+  elif has 'viewer{login}'; then cat "$D/$(variant state '.json')"
+  elif has 'reviewRequests(first:100, after' || has 'reviewRequests(first:100,after'; then seqcat requests "$page"
+  elif has 'reviews(first:100'; then cat "$D/reviews_$page.json"
+  elif has headRefOid; then
+    # head_<N>.json (the Nth call to this query) wins over head.json, so a test can make the
+    # PR change between reads.
+    n=$(( $(cat "$D/head.count" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$D/head.count"
+    if [ -f "$D/head_$n.json" ]; then cat "$D/head_$n.json"; else cat "$D/head.json"; fi
+  else echo "fake gh: no fixture for query: $query" >&2; exit 99
+  fi
+  exit 0
+fi
+
+if [ "$1" = api ] && [ "$2" = -i ]; then cat "$D/$(variant events_first '.txt')"; exit 0; fi
+if [ "$1" = api ]; then
+  case $2 in
+    *page=*)
+      n=${2##*page=}; n=${n%%&*}
+      cat "$D/$(variant "events_page$n" '.json')" ;;
+    *) echo "fake gh: no fixture for: $*" >&2; exit 99 ;;
+  esac
+  exit 0
+fi
+echo "fake gh: unhandled call: $*" >&2
+exit 99
