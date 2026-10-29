@@ -15,22 +15,49 @@ squash-merge box, and it is part of the completion report.
 
 ## Procedure
 
-1. Read the PR as a whole, not the review loop's own history:
+1. Read the entire branch's final PR diff, not just the review loop's fixes
+   or latest commit. Identify the actual base and published head:
 
    ```bash
-   gh pr view <n> --json title,body,headRefName
+   gh pr view <n> --json title,body,baseRefName,headRefName,baseRefOid,headRefOid
    gh pr diff <n>
    ```
 
-2. Invoke the repo's **`commit-message` skill** on that diff. It owns the format (a subject
-   of 50 characters or fewer in the imperative, then a bulleted body of the significant
-   changes wrapped at 72 characters, and no attribution lines). Don't hand-write the
-   message and don't restate its rules here.
+   Inspect the complete changed-file list and diff, in chunks if output
+   is truncated. Use branch history only as context for the final changes.
+   For local comparisons, use current verified refs and the merge-base
+   comparison `git diff <base>...<head>`, not a working-tree or last-commit
+   diff. Refresh the comparison if the published head changes.
+
+   Find associated tickets through PR issue/development links, closing
+   references, and IDs/URLs in the title, body, discussion, branch name,
+   or commits. Retrieve their descriptions, acceptance criteria, and relevant
+   clarifications using available read-only integrations or authenticated
+   tools, including external trackers. Verify that a mention is actually
+   associated with this PR. Use ticket context for intent and the final diff
+   for delivered behavior; never claim inaccessible ticket details or
+   unverified acceptance criteria. Do not update tickets while drafting.
+
+2. Use the **`commit-message` skill** when installed. It is optional; this
+   skill must also work when installed alone. Without it, draft a message
+   using this bundled fallback: an imperative subject of 50 characters or
+   fewer with no trailing period, a blank line, a short paragraph of one or
+   two sentences explaining the intent, another blank line, then
+   significant-change bullets in imperative mood. Ground the intent in the
+   diff and task context. Wrap the paragraph and bullets at 72 columns;
+   use two-space hanging indents for bullets. Omit mechanical trivia and
+   attribution/signature lines.
+   Check the lengths before presenting the result.
 
 3. Apply these PR-specific rules on top of it:
    - **Describe what the PR delivers, not how it got there.** The commits titled "Address
      Copilot review round N" are the loop's bookkeeping: leave them out. The squashed
      message should read as if the final state had been written in one go.
+   - **Cover every significant outcome across the branch.** More detail is
+     appropriate for a broad PR, but group related changes, put the main
+     outcome first in each bullet, and order bullets by importance. Keep
+     the intent paragraph short; avoid a commit-by-commit or file-by-file
+     inventory. Check the draft against the full diff and changed-file list.
    - **Keep the ticket prefix.** If the PR title starts with a ticket key (e.g.
      `CORE-320: ...`), keep it as the subject prefix; the 50-character limit covers the
      whole subject line.
@@ -44,6 +71,8 @@ squash-merge box, and it is part of the completion report.
    ````markdown
    ```markdown
    CORE-123: Subject line in the imperative
+
+   Explain the problem this commit addresses or the outcome it enables.
 
    - First significant change
    - Second significant change
