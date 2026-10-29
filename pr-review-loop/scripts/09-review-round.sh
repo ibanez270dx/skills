@@ -18,7 +18,7 @@
 # acknowledges it, and each recap leaves a visible record on the PR.
 #
 # This script decides nothing else: it doesn't stop the loop, enforce a cap, or pick a
-# verdict. The parent agent owns the recap reasoning and the CONTINUE / REVERT-AND-SHIP /
+# verdict. The parent agent owns the recap reasoning and the CONTINUE / REVERT-AND-REVIEW /
 # HAND-OFF verdict (see ../references/09-convergence.md), then records that it ran the recap
 # with --ack.
 #

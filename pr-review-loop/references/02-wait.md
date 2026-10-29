@@ -1,76 +1,48 @@
 # Step 2: Wait for review
 
-Owner: **delegable** to an `edit`-class worker; budget: **20-minute
-hard cap** — a single bounded dispatch, never extended. Without a
-worker, the orchestrator polls inline on the same schedule; see
-[harness-adaptation.md](harness-adaptation.md).
-
-**Skipped** when the loop is in [single-iteration
-mode](orchestration.md#single-iteration-fallback) — there's no Copilot
-review to wait for.
+Owner: orchestrator launches a read-only shell process. No polling worker
+is needed. Skip this step in request-only and limited-pass modes.
 
 ## Inputs
 
-From step 1:
-- `PrNumber`.
-- `baseline` — the `LatestCopilotReview.submittedAt` string captured
-  before the trigger fired (empty string if no prior Copilot review).
-
-## Return contract
-
-- `02-check-review-status.sh` JSON snapshot.
-- `recommendation` ∈ {`ready`, `give-up-push-commit`}.
-- `ready` iff **both** `LatestCopilotReview.submittedAt > baseline`
-  AND `ReviewAtHead: true`.
+- `PrNumber` and optional `--owner` / `--repo` together.
+- `baseline`: latest Copilot review's `submittedAt` captured before request;
+  pass an empty string if no prior review exists.
+- Expected published `HeadOid` from step 1.
 
 ## Procedure
 
-Poll `02-check-review-status.sh` approximately every **3 minutes**
-until `ready` or the 20-minute cap is hit:
+Invoke the bundled script from the target repository, using the resolved
+skill directory:
 
 ```bash
-./scripts/02-check-review-status.sh --pr <n>
+"$skill_dir/scripts/02-wait-for-review.sh" --pr <n> \
+  --baseline "$baseline" --head "$head_oid"
 ```
 
-- Extract `submittedAt` and `ReviewAtHead` from the JSON each tick.
-- Stop and return `ready` on the first tick that satisfies both
-  conditions vs. the captured `baseline`.
-- On cap reached without `ready`, return `give-up-push-commit`.
+Defaults: poll every 180 seconds for up to 1,200 seconds. The script reads
+the existing status checker, sleeps internally, and emits only one compact
+JSON result. Use background execution or the harness's completion facility
+if a foreground command cannot remain open. Do not repeatedly wake a model
+to re-run the GitHub query or print every snapshot.
 
-### Without a worker (tier 3)
+## Return contract
 
-A single-agent orchestrator must not burn its own turns on seven
-polling round-trips. Run the whole wait as one shell command that
-sleeps between ticks and exits as soon as it is `ready`:
+`{ WaitStatus, ElapsedSeconds, Snapshot }`, where `Snapshot` is the latest
+`02-check-review-status.sh` result:
 
-```bash
-baseline='<submittedAt from step 1, or empty>'
-for _ in 1 2 3 4 5 6 7; do
-  snap=$(./scripts/02-check-review-status.sh --pr <n>) || exit 1
-  at=$(printf '%s' "$snap" | jq -r '.LatestCopilotReview.submittedAt // ""')
-  head=$(printf '%s' "$snap" | jq -r '.ReviewAtHead')
-  if [ "$head" = "true" ] && [ "$at" \> "$baseline" ]; then
-    printf '%s\n' "ready $snap"; exit 0
-  fi
-  sleep 180
-done
-printf 'give-up-push-commit\n'
-```
+| WaitStatus | Exit | Meaning |
+| --- | --- | --- |
+| `ready` | 0 | A newer Copilot review exists at the expected HEAD, with no review pending. Continue to triage, even if the review contains findings. |
+| `timeout` | 124 | No qualifying review by the deadline. Report stopped with the snapshot; resume later using the same baseline and expected HEAD. |
+| `head-changed` | 3 | The published PR HEAD changed. Inspect and revalidate before continuing. |
+| `pr-closed` | 3 | PR is no longer open. Stop the loop. |
 
-Dispatch it with whatever "run in the background / long timeout"
-facility the harness offers rather than a foreground call that may hit
-a tool timeout at the 20-minute mark. ISO-8601 `submittedAt` values
-sort correctly as strings, which is why `\>` works here.
+Other failures exit 1 with a diagnostic on stderr and must not be treated
+as readiness. The deadline is checked between API calls; an in-progress
+GitHub request may extend elapsed time beyond it.
 
-## Gotchas
-
-- **Don't poll faster than ~3 minutes.** There is no progress signal
-  from the API; faster polling only burns budget.
-- **`give-up-push-commit` fallback is orchestrator-driven.** When the
-  worker returns this recommendation, the **orchestrator** pushes a
-  substantive (non-whitespace) commit — auto-assign on `synchronize` is
-  the most reliable trigger. Then the orchestrator re-enters the loop at
-  step 1 with a fresh `baseline`.
-- **Single bounded run, not extension-driven.** Do not request
-  extensions on this step — if 20 min isn't enough, the right move is
-  the `give-up-push-commit` fallback, not more polling.
+Readiness means a review is available, not that it is clean or converged.
+The script never edits code, pushes, requests another review, or posts a
+comment. A timeout does not authorize those actions. Fixing a genuine
+finding may later produce a substantive commit through the normal workflow.

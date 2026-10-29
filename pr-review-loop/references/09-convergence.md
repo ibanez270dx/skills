@@ -1,240 +1,108 @@
-# Step 9: Convergence verify
+# Step 9: Verify convergence
 
-Owner: **delegable** to an `inspect`-class worker; budget: 3 min.
-See [harness-adaptation.md](harness-adaptation.md).
+Owner: orchestrator decides completion; read-only inspection may be delegated.
+Run from the target repository using the installed skill's script paths.
 
-## Inputs
-
-- `PrNumber`.
-- The pushed `HeadOid` from step 7 (for the independent sanity check).
-- Whether the loop is in normal mode or [single-iteration
-  mode](orchestration.md#single-iteration-fallback) (decided at step 1).
-
-## Return contract
-
-```
-{ converged, head_oid, latest_review_commit_oid, submitted_at,
-  open_thread_count, open_threads_awaiting_reply, escalated_threads }
-```
-
-`converged` is the single source-of-truth boolean — `Converged: true`
-returned by `02-check-review-status.sh`.
-
-## Procedure
-
-Run the status check, passing `--single-iteration` iff the loop took the
-fallback at step 1:
+## Evidence and decision
 
 ```bash
 ./scripts/02-check-review-status.sh --pr <n>
-# single-iteration variant:
-./scripts/02-check-review-status.sh --pr <n> --single-iteration
 ```
 
-Then run an **independent HEAD-vs-`LatestCopilotReview.commitOid`
-sanity check** — the orchestrator's recorded `HeadOid` from step 7 should
-match `HEAD` and (in normal mode) match the latest review's
-`commitOid`.
+For full-loop success, require all of the following from the normal-mode
+snapshot, and independently compare the published SHA with local HEAD and
+the SHA recorded at step 7:
 
-## Decision: loop back or exit
+- PR is `OPEN` and a real `LatestCopilotReview` exists.
+- `HeadOid` equals `LatestCopilotReview.commitOid` (`ReviewAtHead: true`).
+- `NoNewComments: true` and `PreviouslyMissedCount: 0`.
+- `OpenThreadsAwaitingReply: 0` and `CopilotPending: false`.
+- `Converged: true` from the canonical status checker.
 
-After the status check, the orchestrator agent **must** branch on `converged`:
+The status script owns parsing and snapshot consistency. Do not replace it
+with a thread count or a separate interpretation of the review body.
 
-```
-if converged == true:
-    run step 10 once (cleanup outdated)
-    run step 11 once (squash message: commit-message skill on the PR diff, shown as markdown)
-    report completion with proof (HeadOid, LatestCopilotReview.commitOid, submittedAt),
-      any human hand-offs (ReviewSummary), and the squash message
-    DONE — exit the loop
-else:
-    # non-converged = a fresh Copilot finding OR an unresolved human thread.
-    # round = count of Copilot review submissions in the PR's history,
-    #         read deterministically from the API (NOT a mental tally):
-    #             ./scripts/09-review-round.sh --pr <n>   -> {Round, RecapsAcknowledged, RecapDue}
-    if RecapDue == true:                        # a boundary (10, 20, 30, ...) was reached
-        RUN THE RECAP GATE (see "Round cap & recap gate" below) BEFORE looping:
-            recap ALL prior rounds, then pick CONTINUE / REVERT-AND-SHIP / HAND-OFF,
-            and record it:  ./scripts/09-review-round.sh --pr <n> --ack --body "<the recap>"
-            CONTINUE        -> fall through and start another round
-            REVERT-AND-SHIP -> drop drifted commits, ship the in-scope result, exit
-            HAND-OFF        -> escalate to the user with the recap, exit
-    GO BACK TO STEP 1 — start another round
-    (re-trigger via 01-request-review.sh, wait via 02-wait,
-     list via 03-list-threads, triage, fix, push, reply+resolve,
-     re-check via this step)
-```
+If these conditions hold, run steps 10 and 11 once, then report **Copilot
+converged at HEAD** with `HeadOid`, `LatestCopilotReview.commitOid`,
+`submittedAt`, and `OpenThreadsAwaitingReply: 0`. List open human hand-offs.
+When `ReviewVerdict` is not `Approved`, include `ReviewSummary` verbatim
+when present: a clean review may still request human confirmation.
 
-A non-converged result is **never** terminal *on its own* — each round
-addresses the open review feedback on the previous round's HEAD,
-whether that's a **Copilot finding or a human review comment** (this
-skill handles both). The loop terminates only when there are **no new
-review comments from either source** AND **every open thread — Copilot
-or human — has a reply from the agent** (a thread the agent escalated
-to the user counts as replied; it stays open in `OpenThreadCount` as an
-explicit hand-off, not as loop work). But "never terminal" must not be
-read as "infinite": a bot-review loop has no guaranteed fixed point and
-can drift into over-engineering or oscillation. No script *enforces* a
-cap or stops the loop — capping is a reasoning decision the orchestrator owns
-at the [round-cap recap gate](#round-cap--recap-gate-circuit-breaker)
-below. What *is* scripted is the round **count** itself
-([09-review-round.sh](#round-cap--recap-gate-circuit-breaker)), so the
-gate's trigger is deterministic rather than a fallible mental tally
-(and oscillation — the same finding re-raised across rounds — is
-broken earlier per
-[04-triage.md](04-triage.md#conflicting-comments--break-oscillation-early)).
+If not converged, inspect why. New or remaining findings lead to another
+round after the recap check below. An in-flight review leads to bounded
+waiting, not another trigger. Timeout, PR closure, unexpected HEAD changes,
+failed validation, API failures, or drift lead to the explicit stopped
+outcomes in [orchestration.md](orchestration.md#stopping-conditions).
 
-`--single-iteration` mode is the **one** exception: by definition, it
-runs one round only (the trigger path is unavailable), and the
-`converged` result is taken as terminal whichever way it goes.
+## Convergence semantics
 
-### Convergence semantics
+The canonical script has several branches. Their output is useful only
+with the selected operating mode:
 
-`02-check-review-status.sh` implements a PR-state guard plus three Converged branches (see the `Converged:` expression in the final `jq` program of that script for the canonical source):
+| Branch | Meaning |
+| --- | --- |
+| PR not open | `Converged: false`; stop rather than pushing or looping. |
+| Copilot review exists or is pending | Convergence requires a clean at-HEAD review, no pending review, and no threads awaiting reply. |
+| `--single-iteration` | `Converged` checks reply coverage only. Report limited-pass completion, never fresh Copilot convergence. |
+| No Copilot review and none pending | `Converged` can be true with zero unanswered threads. This is not Copilot convergence: step 1 must request review, or report a concrete inability to do so. |
 
-- **PR State guard (overrides everything)** — if `State != 'OPEN'` (CLOSED / MERGED), `Converged: false` regardless of all other flags. The agent cannot push to a non-OPEN PR; surface the state change to the user and abort the loop rather than reporting completion.
-- **Normal (Copilot-driven) mode** — a Copilot review exists OR `CopilotPending: true`:
-  `Converged: true` iff
-  `ReviewAtHead && NoNewComments && OpenThreadsAwaitingReply == 0 && !CopilotPending`
-  (a clean review at HEAD does not end the loop while another review of the same HEAD is
-  still in flight; it may yet post findings).
-  `NoNewComments` is true only for a clean review body: `**0 open findings**`
-  (current format) or "generated no new comments" (older format), **and** no
-  "Previously missed" section. Findings listed there are unthreaded, so a review
-  with `PreviouslyMissedCount > 0` is not converged; see
-  [03-list-threads.md](03-list-threads.md).
-- **Single-iteration mode** (`--single-iteration` passed because the loop took the [fallback at step 1](orchestration.md#single-iteration-fallback)):
-  `Converged: true` iff `OpenThreadsAwaitingReply == 0`. The stale-review checks can never advance without a new Copilot review, so they're omitted.
-- **No Copilot review ever observed AND not pending** (brand-new PRs with zero findings, or PRs where the trigger silently failed and the script wasn't called with `--single-iteration`):
-  `Converged: true` iff `OpenThreadsAwaitingReply == 0`. **Do NOT trust this as "loop done" before step 1 has fired** — it just means there's no human-thread work pending. The orchestrator agent MUST run `01-request-review.sh` first (per [step 1](01-request-review.md)) and re-check; treating brand-new-PR convergence as terminal will short-circuit the entire loop.
+In a limited pass, use `--single-iteration` only after the fallback decision
+at step 1. Handle body-only findings too; reply coverage alone cannot prove
+they were addressed. End after that pass with the addressed and remaining
+work, and state that fresh review is unavailable. Do not run post-convergence
+cleanup or claim full-loop success from this branch.
 
-**The snapshot is consistent or it fails.** `02-check-review-status.sh` reads everything that
-feeds `Converged` twice (the PR head and the contents of the reviews, every page of threads,
-every page of review requests) and compares the two passes. If anything moved (a commit,
-a review, a human reply, a new Copilot request), it retakes the snapshot, so it cannot combine
-an old clean review with a newer pending one or miss a reply that landed after the threads were
-read. If the PR keeps changing for 3 attempts it exits non-zero rather than guess. Re-run it
-after a moment; do not treat that failure as convergence.
+Open threads may remain when each is an explicit escalation with our reply.
+A human replying later puts that thread back into triage. Non-Copilot threads
+default to hand-offs unless the user scoped them in; they do not turn this
+into a general review workflow.
 
-**`Converged` is about the agent, not the humans.** It can be `true` while Copilot's
-header says "Needs a closer look" and asks a person to confirm something (e.g. production
-preflight checks, staging validation) with 0 findings. That is a hand-off, not agent work,
-so it does not block convergence. But it must not vanish: read `ReviewVerdict` and
-`ReviewSummary` from the status output, and when the verdict is not "Approved", put
-`ReviewSummary` verbatim in the completion message as an item for the human merge owner.
-
-`OpenThreadCount` MAY be `> 0` when escalated-to-user threads stay
-open — that's an explicit human hand-off, not a loop failure. Return
-the list of escalated `thread_id`s so the orchestrator can include them in
-the convergence proof.
+The script takes two reads of all convergence inputs: HEAD/reviews, all
+thread pages, and all review-request pages. If they differ, it retries the
+snapshot, failing after three unstable attempts rather than combining
+inconsistent state. An error is not convergence. Review bodies with
+Previously missed findings are never clean, even if they show zero new
+threaded findings; read `03-review-body.sh` as described in step 3.
 
 ## Round cap & recap gate (circuit breaker)
 
-No script *enforces* a max-rounds cap or stops the loop — a hard number
-can't tell a *productive* round from a *drifting* one. Instead the orchestrator
-agent runs a **recap gate** as reasoning: default **STOP at every 10th
-round** (10, 20, 30, …) **before** looping back to step 1, recap all
-prior rounds, and decide whether the loop is still serving the PR's
-original scope.
-
-What *is* scripted is the **count**, so the gate's trigger is
-deterministic instead of a fallible mental tally. A **round** is **one
-execution of [step 1](01-request-review.md)** — one Copilot-review
-trigger at the top of the loop — which produces at least one Copilot
-review submission. [`09-review-round.sh`](../scripts/09-review-round.sh)
-counts those submissions straight from the PR's API history and reports
-whether a recap is due:
+Before starting another non-converged round, run:
 
 ```bash
 ./scripts/09-review-round.sh --pr <n>
-# {"PrNumber":<n>,...,"Round":20,"RecapInterval":10,"RecapsAcknowledged":1,"RecapDue":true}
 ```
 
-**Due means "a boundary was reached and nobody has acknowledged it", not "the count is exactly a
-multiple of 10".** `RecapDue` is true when `floor(Round / RecapInterval)` exceeds
-`RecapsAcknowledged`. An automatic review on push plus a requested one can land two reviews
-between checks and take the count from 9 to 11, stepping over 10; an exact-multiple test would
-miss that, and with two reviews per round it could skip every boundary. This way the recap stays
-due until the orchestrator acknowledges it.
+The script counts Copilot review submissions from PR history, including
+automatic reviews. This is a review-count proxy for rounds, not a count of
+agent invocations or triggers. Its default recap interval is 10; `RecapDue`
+stays true after crossing a boundary until acknowledged, so concurrent
+reviews cannot skip the gate by jumping from 9 to 11.
 
-**Acknowledging.** After running the recap and picking a verdict, record it **before looping
-back** (and before a REVERT-AND-SHIP or HAND-OFF exit, so the record exists):
+When due, recap **all** prior rounds against the original PR scope:
+
+1. Original goal and the changes actually required to achieve it.
+2. Each finding, fix/decline/escalation disposition, and resulting change.
+3. Out-of-scope growth, speculative abstractions, reversals of earlier fixes,
+   repeated findings without progress, and work belonging in a separate PR.
+
+Stop earlier for oscillation; do not wait for a multiple of 10 when about
+to repeat an edit already reverted. See
+[04-triage.md](04-triage.md#conflicting-comments--break-oscillation-early).
+
+Choose and record the verdict:
+
+| Verdict | Action |
+| --- | --- |
+| `CONTINUE` | Findings and changes remain in scope and productive. Start the next round. |
+| `REVERT-AND-REVIEW` | Clearly isolated drift can be safely undone within scope. Preserve in-scope work, create ordinary revert commits without rewriting published history, validate, push, and obtain fresh review of the resulting HEAD. If selecting the reverts needs human judgment, hand off instead. |
+| `HAND-OFF` | Drift is entangled, fixes oscillate, or a redesign needs a decision. Stop with a recap and recommendation; do not claim convergence. |
 
 ```bash
-./scripts/09-review-round.sh --pr <n> --ack --body "<the recap: what the rounds were, drift assessment, verdict>"
+./scripts/09-review-round.sh --pr <n> --ack --body "<recap and verdict>"
 ```
 
-That posts `--body` as a PR comment carrying a hidden marker. The acknowledgement is derived from
-the PR (comments by the authenticated user with that marker), so no state lives outside it, and
-the recap is a visible record for the human merge owner. `--ack` fails when no recap is due, so
-it can't be double-counted.
-
-Run `09-review-round.sh` at the top of the non-converged branch and gate on `RecapDue`.
-Because the count is **derived from history, not remembered**, it can't
-drift even across a 100+ round run — the exact failure this gate exists
-to catch. The cap counts **review rounds** (Copilot review submissions),
-not worker calls, tool calls, or individual fix edits — so a round
-that triages five threads still counts as one. The cadence is the
-`--recap-interval` knob (default 10). The script reports the trigger only;
-it never decides the verdict.
-
-This exists because an unbounded bot-review loop is the failure mode
-this skill was built to survive: a real run drifted for 156 rounds —
-later rounds "fixing" things the PR never set out to change, eventually
-reverting their own earlier fixes. The gate catches that class of drift
-early, every 10 rounds, instead of once at the end.
-
-### What the recap reviews (ALL prior rounds, not just the last 10)
-
-1. **Original PR scope** — the issue/PR title and the diff at the PR's
-   base. This is the yardstick; everything else is measured against it.
-2. **Per-round ledger** — for each round so far: the Copilot finding,
-   the disposition (fixed / declined / escalated), and the resulting
-   change (files + intent in one line).
-3. **Drift signals** across the whole history:
-   - **Out-of-scope** — a change that doesn't trace back to the
-     original issue/PR goal (new feature, adjacent refactor, polish
-     the PR never promised).
-   - **Over-engineering** — defensive layers, abstractions, or config
-     added solely to satisfy bot nits, not the PR's actual goal.
-   - **Wrong-direction** — a fix that later rounds had to undo, work
-     around, or re-fix (self-revert / oscillation across rounds).
-   - **Belongs-in-separate-PR** — a legitimate improvement that is
-     nonetheless unrelated to this PR's stated change.
-   - **Scope/complexity growth** — diff size or file count climbing
-     while the original goal was met rounds ago.
-
-### Verdicts
-
-| Verdict | When | Action |
-| --- | --- | --- |
-| **CONTINUE** | Every round so far traces to the original PR scope; no drift signals; Copilot is still surfacing in-scope findings. | Loop back to step 1 for the next 10-round block. |
-| **REVERT-AND-SHIP** | One or more rounds drifted (over-engineering / wrong-direction / oscillation) but the in-scope fixes are sound. | `git revert` (or drop) only the drifted commits, keep the in-scope ones, run step 6 build/test, then ship the clean result. Record which rounds were reverted in the convergence proof. |
-| **HAND-OFF** | Drift is entangled with in-scope work, the right fix is a redesign, or the change belongs in a separate PR. | Stop the loop, reply on the relevant threads, and escalate to the user with the recap and a recommendation (separate PR / redesign). Do **not** keep looping. |
-
-The **trigger** is scripted but the **verdict** is agent reasoning —
-deliberately. [`09-review-round.sh`](../scripts/09-review-round.sh)
-makes the *count* deterministic (so the gate can't be missed), but
-*which verdict to pick* stays a judgment call: no number can tell a
-productive round from a drifting one. The recap is cheap (read the
-per-round commits + the PR base diff); the cost of *skipping* it is
-another runaway loop.
-
-
-
-- **Trust `02-check-review-status.sh`'s `Converged` flag, not your
-  own re-derivation.** The script enforces all three conditions
-  (normal mode) or the simplified condition (single-iteration) and
-  is the canonical source.
-- **Do not report completion until `converged == true`.** Print
-  the proof (`HeadOid`, `LatestCopilotReview.commitOid`,
-  `submittedAt`, `OpenThreadsAwaitingReply: 0`, list of escalated
-  threads if `OpenThreadCount > 0`) in the completion message.
-- **`--single-iteration` is sticky to the fallback decision.** If
-  step 1 took the fallback, every step 9 in this loop uses
-  `--single-iteration`; don't flip it mid-loop.
-- **PR State != OPEN aborts the loop.** If `State` is `CLOSED` or
-  `MERGED`, `Converged` is forced `false` by the script's state
-  guard. The orchestrator agent cannot push to a non-OPEN PR — surface
-  the state change to the user and stop the loop rather than
-  retrying or reporting completion.
+Acknowledgement posts a visible PR comment with a hidden marker; keep it
+with the orchestrator's other remote mutations. A recap is not a successful
+review, and a revert invalidates prior HEAD evidence. No verdict authorizes
+merging, deployment, or a force-push. Only fresh convergence can end the
+full loop successfully; a hand-off is a separate stopped outcome.

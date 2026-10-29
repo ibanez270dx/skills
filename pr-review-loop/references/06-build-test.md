@@ -1,8 +1,7 @@
 # Step 6: Build + test per repo conventions
 
-Owner: **delegable** to a `run`-class worker (discovery may fan out to
-several `inspect`-class workers in parallel); budget: 10 min
-(extension cap up to 2× for slow suites). See
+Owner: orchestrator, optionally delegated to a `run`-class worker.
+Allow the repository's actual suites to finish; surface stalls or failures. See
 [harness-adaptation.md](harness-adaptation.md).
 
 ## Inputs

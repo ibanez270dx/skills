@@ -1,8 +1,7 @@
 # Step 4: Triage
 
-Owner: **delegable** to an `edit`-class worker; budget: **5 min per ≤5
-threads** (orchestrator batches in waves of ≤5 if step 3 returned
-more). See [harness-adaptation.md](harness-adaptation.md).
+Owner: orchestrator decides dispositions; optional workers may investigate
+small, coherent batches of findings. See [harness-adaptation.md](harness-adaptation.md).
 
 ## Inputs
 
@@ -45,8 +44,8 @@ step 5 consumes only the `fix` rows, step 8 consumes the full table.
 
 ## Gotchas
 
-- **Batch in waves of ≤5 per worker invocation.** Larger batches
-  blur the rationale and overrun the 5-min budget.
+- **Keep investigation batches coherent.** Preserve a separate disposition
+  and rationale for every finding, with or without optional workers.
 - **Human / advanced-security default is `escalate-to-user`.**
   Auto-replying or auto-resolving a human review thread hides
   unaddressed concerns and is socially wrong.
@@ -124,9 +123,9 @@ correctness reasoning. Before applying a generic "fix", **research
 the repo's own conventions first** — `.github/instructions/*.md`
 files (often have an `applyTo` glob that pins them to the changed
 file's path), `.github/skills/`, `AGENTS.md`, `CONTRIBUTING.md`, CI
-config, and recent commits to similar files. Fan out multiple
-`inspect`-class workers when several axes need checking (lint, format,
-spell-check, license header, etc.) — don't invent answers. What
+config, and recent commits to similar files. Use optional
+`inspect`-class workers for independent investigations when useful (lint,
+format, spell-check, license header, etc.); otherwise inspect inline. What
 looks like an obvious fix may violate a project rule:
 
 - **Spell-check / dictionary findings.** If the project uses a

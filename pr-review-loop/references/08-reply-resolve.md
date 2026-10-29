@@ -1,8 +1,7 @@
 # Step 8: Reply (always) + resolve (conditional)
 
-Owner: **split** — an `edit`-class worker **drafts** the reply bodies;
-the **orchestrator** posts them (mutations are orchestrator-only).
-Budget for the drafting pass: 5 min. See
+Owner: orchestrator drafts and posts replies. An optional worker may draft
+reply bodies, but mutations remain orchestrator-only. See
 [harness-adaptation.md](harness-adaptation.md).
 
 Runs AFTER step 7 (commit + push) so every reply can cite the
@@ -30,7 +29,7 @@ Procedure).
 
 ## Procedure
 
-1. **Drafting worker** produces a `reply_body` per thread by
+1. **Orchestrator or drafting worker** produces a `reply_body` per thread by
    selecting the appropriate template (see [#templates](#templates))
    based on the triage `action`. Cite the pushed SHA from step 7 in
    `fix` replies. For `escalate-to-user`, explain the disposition and

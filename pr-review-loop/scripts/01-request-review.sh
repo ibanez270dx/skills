@@ -17,8 +17,8 @@
 #   Status="TriggerLanded"  mutation submitted and verified by a NEW copilot_work_started
 #                           event id.
 # Failure (exit 1, message on stderr): the mutation failed, or no new event landed within
-# --verify-seconds. Push a substantive commit and retry: auto-assign on `synchronize` is
-# the most reliable fallback.
+# --verify-seconds. Inspect the request/pending state before recovery. Never create
+# a commit solely to trigger review.
 
 . "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
@@ -196,10 +196,10 @@ if [ "$PERM_ERR" = true ]; then
     (verified: requestReviews rejects bot node IDs; no REST \`bot_reviewers\` field).
   - The UI's re-request button uses an internal endpoint not in the public API.
 
-Use one of these workarounds (both reliably drive Copilot to re-review):
+Recovery options (automatic review depends on repository configuration):
   1. UI: open the PR in a browser and click the refresh icon next to 'copilot-pull-request-reviewer'.
-  2. CLI: push a substantive (non-whitespace) commit. The \`synchronize\` event
-     auto-triggers Copilot with no API call and no permission required.
+  2. If genuine in-scope fixes are already ready, push them normally; automatic
+     review on push may be configured. Never create a commit solely to trigger review.
 
 After triggering by either means, resume the loop with 02-check-review-status.sh.
 
@@ -218,7 +218,7 @@ if [ "$GH_EXIT" -ne 0 ]; then
   die "GraphQL requestReviewsByLogin failed: $GH_STDERR
 
 Most likely causes:
-  * Quiet-period after a recent dismissal of Copilot: wait 5-10 min, or push a substantive commit.
+  * Quiet-period after a recent dismissal of Copilot: wait and inspect pending state.
   * Copilot Code Review not enabled on the repo / account.
   * PR in a state that blocks bot review (draft, conflict, branch protection)."
 fi
@@ -262,7 +262,8 @@ if [ "$AFTER_ID" -eq 0 ]; then
   Latest copilot_work_started event id before trigger: $BEFORE_ID
   HEAD: $HEAD_OID$TAIL
 
-Push a substantive commit (auto-assign on synchronize is the most reliable trigger) and retry."
+Inspect pending-review state and repository settings before retrying or requesting
+manual re-review. Never create a commit solely to trigger review."
 fi
 
 jq -cn --argjson n "$PR" --arg head "$HEAD_OID" --arg ts "$AFTER_TS" \

@@ -645,7 +645,7 @@ echo 1 >"$FAKE_GH_DIR/mutation.exit"
 echo 'GraphQL: viewer does not have the correct permissions to execute RequestReviewsByLogin' >"$FAKE_GH_DIR/mutation.err"
 out=$("$SCRIPTS/01-request-review.sh" --pr 5 --verify-seconds 1 2>&1 || true)
 assert_contains 'permission error as the PR author -> author-specific workarounds' "$out" 'You are the PR author (me-bot)'
-assert_contains '  mentions the push-a-commit fallback' "$out" 'push a substantive (non-whitespace) commit'
+assert_contains '  forbids commits solely to trigger review' "$out" 'Never create a commit solely to trigger review'
 
 new_scenario
 mkstate OPEN me-bot someone-else '[]' >"$FAKE_GH_DIR/state.json"
@@ -757,6 +757,74 @@ assert_contains '  refuses to push there' "$out" 'PR head is the default branch'
 rm -rf "$REPO_DIR"
 
 # ======================================================================
+echo "02-wait-for-review: bounded read-only polling"
+wait02() { "$SCRIPTS/02-wait-for-review.sh" --pr 7 --head "$HEAD" --baseline '2026-01-01T00:00:00Z' "$@"; }
+setup02 OPEN "$R_CLEAN" '[]' '[]'
+out=$(wait02 --timeout-seconds 5); rc=$?
+assert_eq 'new at-HEAD review is ready' "$rc" 0
+assert_eq '  returns a compact ready snapshot' "$(jqv "$out" '[.WaitStatus, .Snapshot.ReviewAtHead] | @csv')" '"ready",true'
+assert_eq '  emits exactly one JSON result' "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 1
+
+# One status snapshot takes two identical head reads. First poll is stale,
+# the next poll sees the completed review without another model invocation.
+setup02 OPEN "$R_CLEAN" '[]' '[]'
+cp "$FAKE_GH_DIR/head.json" "$FAKE_GH_DIR/fresh.json"
+write_head OPEN "$HEAD" '[]'
+cp "$FAKE_GH_DIR/head.json" "$FAKE_GH_DIR/head_1.json"
+cp "$FAKE_GH_DIR/head.json" "$FAKE_GH_DIR/head_2.json"
+cp "$FAKE_GH_DIR/fresh.json" "$FAKE_GH_DIR/head.json"
+out=$(wait02 --interval-seconds 1 --timeout-seconds 10); rc=$?
+assert_eq 'stale snapshot becomes ready after an internal poll' "$rc" 0
+assert_eq '  result is ready' "$(jqv "$out" .WaitStatus)" ready
+assert_eq '  made two status snapshots' "$(cat "$FAKE_GH_DIR/head.count")" 4
+assert_not_contains '  never requested review' "$(cat "$FAKE_GH_DIR/gh.log")" requestReviewsByLogin
+assert_not_contains '  never posted a PR comment' "$(cat "$FAKE_GH_DIR/gh.log")" 'pr comment'
+
+setup02 OPEN "$R_CLEAN" '[]' "$(jq -cn --argjson a "$(copilot_request)" '[$a]')"
+out=$(wait02 --interval-seconds 180 --timeout-seconds 1); rc=$?
+assert_eq 'new review with another pending does not return ready' "$rc" 124
+assert_eq '  timeout preserves pending state' "$(jqv "$out" '[.WaitStatus, .Snapshot.CopilotPending] | @csv')" '"timeout",true'
+assert_not_contains '  timeout never requested another review' "$(cat "$FAKE_GH_DIR/gh.log")" requestReviewsByLogin
+
+setup02 OPEN "$R_CLEAN" '[]' '[]'
+out=$("$SCRIPTS/02-wait-for-review.sh" --pr 7 --head "$HEAD" --baseline '2026-01-02T00:00:00Z' --timeout-seconds 1); rc=$?
+assert_eq 'existing review at the baseline times out' "$rc" 124
+assert_eq '  preserves snapshot for resume' "$(jqv "$out" .Snapshot.HeadOid)" "$HEAD"
+
+R_FIND=$(jq -cn --argjson a "$(review copilot-pull-request-reviewer COMMENTED 2026-01-02T00:00:00Z "$HEAD" "$FINDINGS")" '[$a]')
+setup02 OPEN "$R_FIND" '[]' '[]'
+out=$("$SCRIPTS/02-wait-for-review.sh" --pr 7 --head "$HEAD" --baseline '' --timeout-seconds 5); rc=$?
+assert_eq 'first review with findings is ready for triage' "$rc" 0
+assert_eq '  readiness does not claim convergence' "$(jqv "$out" .Snapshot.Converged)" false
+
+setup02 MERGED "$R_CLEAN" '[]' '[]'
+out=$(wait02); rc=$?
+assert_eq 'closed PR stops waiting' "$rc" 3
+assert_eq '  reports pr-closed' "$(jqv "$out" .WaitStatus)" pr-closed
+setup02 OPEN "$R_CLEAN" '[]' '[]'
+out=$("$SCRIPTS/02-wait-for-review.sh" --pr 7 --head different --baseline ''); rc=$?
+assert_eq 'unexpected HEAD stops waiting' "$rc" 3
+assert_eq '  reports head-changed' "$(jqv "$out" .WaitStatus)" head-changed
+
+setup02 OPEN "$R_CLEAN" '[]' '[]'
+echo '{"errors":[{"type":"FORBIDDEN","message":"denied"}]}' >"$FAKE_GH_DIR/head.json"
+out=$(wait02 2>&1); rc=$?
+assert_eq 'API error stops instead of reporting ready' "$rc" 1
+assert_contains '  preserves the underlying API diagnostic' "$out" denied
+
+for args in '--timeout-seconds 0' '--interval-seconds 08' '--timeout-seconds 9999999'; do
+  # Intentional splitting: each fixture is one flag and one plain integer.
+  out=$(wait02 $args 2>&1); rc=$?
+  assert_eq "invalid wait option $args is rejected" "$rc" 1
+done
+out=$("$SCRIPTS/02-wait-for-review.sh" --pr 7 --head "$HEAD" 2>&1); rc=$?
+assert_eq 'baseline must be explicitly supplied' "$rc" 1
+out=$("$SCRIPTS/02-wait-for-review.sh" --pr 7 --head "$HEAD" --baseline yesterday 2>&1); rc=$?
+assert_eq 'malformed baseline is rejected' "$rc" 1
+out=$("$SCRIPTS/02-wait-for-review.sh" --pr 7 --head "$HEAD" --baseline '' --owner acme 2>&1); rc=$?
+assert_eq 'partial repository override is rejected' "$rc" 1
+
+# ======================================================================
 echo "all scripts: a flag with no value is rejected (never hangs)"
 # Run in the background with a hard deadline: the bug being guarded against is an endless loop.
 run_guarded() { # cmd... -> sets GUARD_OUT / GUARD_RC; GUARD_RC=hung if it didn't exit in 5 s
@@ -770,6 +838,8 @@ run_guarded() { # cmd... -> sets GUARD_OUT / GUARD_RC; GUARD_RC=hung if it didn'
 new_scenario
 for pair in 00-preflight:--pr 00-preflight:--owner 00-preflight:--repo \
   01-request-review:--pr 01-request-review:--owner 01-request-review:--repo 01-request-review:--verify-seconds \
+  02-wait-for-review:--pr 02-wait-for-review:--owner 02-wait-for-review:--repo \
+  02-wait-for-review:--baseline 02-wait-for-review:--head 02-wait-for-review:--interval-seconds 02-wait-for-review:--timeout-seconds \
   02-check-review-status:--pr 02-check-review-status:--owner 02-check-review-status:--repo \
   03-list-open-threads:--pr 03-list-open-threads:--owner 03-list-open-threads:--repo 03-list-open-threads:--max-body-length \
   03-review-body:--pr 03-review-body:--owner 03-review-body:--repo \
@@ -784,7 +854,7 @@ done
 
 # ======================================================================
 echo "all scripts: --help and unknown arguments"
-for s in 00-preflight 01-request-review 02-check-review-status 03-list-open-threads 03-review-body 08-reply-and-resolve 09-review-round 10-cleanup-outdated; do
+for s in 00-preflight 01-request-review 02-wait-for-review 02-check-review-status 03-list-open-threads 03-review-body 08-reply-and-resolve 09-review-round 10-cleanup-outdated; do
   out=$("$SCRIPTS/$s.sh" --help 2>&1)
   assert_contains "$s --help prints usage" "$out" 'Usage:'
   out=$("$SCRIPTS/$s.sh" --bogus 2>&1 || true)

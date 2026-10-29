@@ -1,15 +1,14 @@
 # Step 5: Apply fixes
 
-Owner: **delegable** to `edit`-class workers, **one worker per
-finding**, parallel **max 5 concurrent**; budget: 5 min each. If step
-4 returned more than 5 `fix` rows, the orchestrator runs step 5 in
-waves of ≤5. Harnesses without parallel workers process findings
-serially in triage-priority order — see
+Owner: orchestrator, optionally delegated to `edit`-class workers.
+Process fixes serially by default. Parallelize only disjoint edits when
+supported and useful, within the harness's limits; group related findings
+when they share a coherent fix. See
 [harness-adaptation.md](harness-adaptation.md).
 
 ## Inputs
 
-Per worker (one finding per invocation):
+Per finding or coherent group:
 - `thread_id`, `file`, `line` from step 3.
 - The finding `summary` and Copilot's suggested fix (if any).
 - The triage `rationale` from step 4 — the agent already decided this
@@ -40,17 +39,15 @@ a one-line description of the change.
 
 ## Gotchas
 
-- **Max 5 concurrent fix workers.** The cap prevents fix-fanout
-  chaos; the orchestrator merges results and reconciles file conflicts
-  between waves before step 6.
+- **Serialize overlapping edits.** Reconcile all changes before step 6;
+  respect the runtime's concurrency limits when using optional workers.
 - **Never invent a generic answer that contradicts repo practice.**
   That's the "elephant in school" anti-pattern — a Copilot suggestion
   in isolation looks right but breaks the project's lint, format,
   spell-check, license-header, or framework conventions. The
   discovery step is mandatory, not optional.
-- **One finding per worker.** Fixes that need to touch the same
-  file get serialized by the orchestrator between waves — don't merge
-  multiple findings into one worker invocation.
+- **Keep finding IDs traceable.** A grouped fix must identify each finding
+  it addresses so validation and replies cover them all.
 - **Project policy beats Copilot suggestion.** If discovery surfaces
   a documented convention (spell-check allowlist mechanism, lint
   suppression style, etc.) that contradicts the suggested fix, follow
