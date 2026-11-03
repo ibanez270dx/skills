@@ -1,6 +1,9 @@
 ---
 name: write-like-me
 description: Use when creating documents, emails, reports, proposals, presentations, or messages on the user's behalf to ensure they match the user's writing style. Skip minor edits and requests that explicitly do not want style matching.
+metadata:
+  author: jeff@humani.se
+  version: "1.0"
 ---
 
 # Writing Style
