@@ -15,6 +15,7 @@ A running harness may need a refresh or a new session to load changes.
 | --- | --- |
 | [commit-message](commit-message/SKILL.md) | Generate concise, consistently formatted git commit messages. |
 | [pr-review-loop](pr-review-loop/SKILL.md) | Request Copilot PR reviews and iterate on review feedback. |
+| [write-like-me](write-like-me/SKILL.md) | Draft communications in Jeff's writing style using an approved profile and relevant writing references. |
 
 Harness agnostic refers to the agent executing a skill. Individual skills
 can still require a particular service or CLI, such as GitHub and `gh`.
@@ -48,6 +49,11 @@ The following personal discovery paths are documented by the harnesses:
 | Copilot in VS Code | `~/.copilot/skills/` | [VS Code agent skills](https://code.visualstudio.com/docs/agent-customization/agent-skills) |
 | Claude Code | `~/.claude/skills/` | [Claude Code skills](https://code.claude.com/docs/en/skills) |
 | Codex | `~/.agents/skills/` | [OpenAI skill documentation](https://learn.chatgpt.com/docs/build-skills) |
+
+This machine currently uses `~/.codex/skills/` for Codex and
+`~/.copilot/skills/` for Copilot. The `write-like-me` plugin skill location
+also links to the canonical `write-like-me/` directory in this checkout.
+Plugin updates may replace that link; inspect it after updating the plugin.
 
 Paths and discovery behavior can vary by version and configuration. For
 other harnesses, find their documented discovery directory and use the
